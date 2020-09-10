@@ -6,4 +6,4 @@ RUN go build -mod vendor -o /auto-logtube-mapping
 
 FROM alpine:3.12
 COPY --from=builder /auto-logtube-mapping /auto-logtube-mapping
-CMD ["/autodown"]
+CMD ["/auto-logtube-mapping"]
