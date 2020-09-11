@@ -67,13 +67,13 @@ func determinePodLogPath(cfg *rest.Config, client *kubernetes.Clientset, wlName 
 		Name(pod.Name).
 		Namespace(pod.Namespace).
 		SubResource("exec")
-	req.VersionedParams(&corev1.PodExecOptions{
+	req.SpecificallyVersionedParams(&corev1.PodExecOptions{
 		Container: container,
 		Command:   []string{"sh"},
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
-	}, scheme.ParameterCodec)
+	}, scheme.ParameterCodec, corev1.SchemeGroupVersion)
 	log.Println(req.URL())
 	var exec remotecommand.Executor
 	if exec, err = remotecommand.NewSPDYExecutor(cfg, "POST", req.URL()); err != nil {
