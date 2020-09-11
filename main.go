@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	appsv1 "k8s.io/api/apps/v1"
@@ -38,9 +39,49 @@ type WorkloadPatch struct {
 	Spec struct {
 		Template corev1.PodTemplateSpec `json:"template"`
 	} `json:"spec"`
+
+	namespace string
+	name      string
 }
 
-func updateVolumeMounts(cfg *rest.Config, client *kubernetes.Clientset, pod corev1.Pod, wp *WorkloadPatch) (err error) {
+func newWorkloadPatch(namespace, name string) *WorkloadPatch {
+	var wp WorkloadPatch
+	hostPathType := corev1.HostPathDirectoryOrCreate
+	wp.namespace = namespace
+	wp.name = name
+	wp.Spec.Template.Spec.Volumes = []corev1.Volume{
+		{Name: VolumeNameLogtubeAutoMapping, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+			Path: HostPathLogtubeCollectLogsPrefix + "/" + namespace + "-" + name,
+			Type: &hostPathType,
+		}}},
+	}
+	return &wp
+}
+
+func (wp *WorkloadPatch) jsonMarshal() ([]byte, error) {
+	return json.Marshal(wp)
+}
+
+func (wp *WorkloadPatch) updateVolumeMounts(cfg *rest.Config, client *kubernetes.Clientset, selectorLabels map[string]string) (err error) {
+	// check selectorLabels
+	if len(selectorLabels) == 0 {
+		err = fmt.Errorf("%s/%s: no selector labels", wp.namespace, wp.name)
+		return
+	}
+	// list pods
+	var podList *corev1.PodList
+	if podList, err = client.CoreV1().Pods(wp.namespace).List(
+		context.Background(),
+		metav1.ListOptions{LabelSelector: buildSelector(selectorLabels)},
+	); err != nil {
+		return
+	}
+	if len(podList.Items) == 0 {
+		err = fmt.Errorf("%s/%s: no pods", wp.namespace, wp.name)
+		return
+	}
+	// one pod
+	pod := podList.Items[0]
 	for _, container := range pod.Spec.Containers {
 		// execute
 		req := client.CoreV1().RESTClient().Post().
@@ -79,6 +120,10 @@ func updateVolumeMounts(cfg *rest.Config, client *kubernetes.Clientset, pod core
 		})
 		return
 	}
+	if len(wp.Spec.Template.Spec.Containers) == 0 {
+		err = errors.New("no volume mounts updated")
+		return
+	}
 	return
 }
 
@@ -105,9 +150,11 @@ func buildLoggerWhitespaces(l int) string {
 	}
 }
 
-func buildLogger(dp string) func(s string) {
+func buildLogger(key string, dp string) func(s string) {
 	sb := &strings.Builder{}
-	sb.WriteString("└ deployment: [")
+	sb.WriteString("└ ")
+	sb.WriteString(key)
+	sb.WriteString(": [")
 	sb.WriteString(dp)
 	sb.WriteString("] ")
 	sb.WriteString(buildLoggerWhitespaces(len(dp)))
@@ -160,7 +207,7 @@ func main() {
 		}
 
 		for _, dp := range dpList.Items {
-			dpLog := buildLogger(dp.Name)
+			scopeLog := buildLogger("deployment", dp.Name)
 			// check annotations exists
 			if dp.Annotations == nil {
 				continue
@@ -171,55 +218,65 @@ func main() {
 			}
 			// check status.replicas
 			if dp.Status.Replicas == 0 {
-				dpLog("status.replicas == 0")
+				scopeLog("status.replicas == 0")
 				continue
 			}
-			// check selector
-			if len(dp.Spec.Selector.MatchLabels) == 0 {
-				dpLog("no selector found")
-				continue
-			}
-			// list pods
-			var podList *corev1.PodList
-			if podList, err = client.CoreV1().Pods(dp.Namespace).List(
-				context.Background(),
-				metav1.ListOptions{LabelSelector: buildSelector(dp.Spec.Selector.MatchLabels)},
-			); err != nil {
-				return
-			}
-			if len(podList.Items) == 0 {
-				dpLog("no pods found")
-				continue
-			}
-			var wp WorkloadPatch
-			// build patch volumes
-			hostPathType := corev1.HostPathDirectoryOrCreate
-			wp.Spec.Template.Spec.Volumes = []corev1.Volume{
-				{Name: VolumeNameLogtubeAutoMapping, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-					Path: HostPathLogtubeCollectLogsPrefix + "/" + dp.Namespace + "-" + dp.Name,
-					Type: &hostPathType,
-				}}},
-			}
-			// build patch volumeMounts
-			if err = updateVolumeMounts(cfg, client, podList.Items[0], &wp); err != nil {
-				dpLog("failed to create volume mount patches: " + err.Error())
+			wp := newWorkloadPatch(dp.Namespace, dp.Name)
+			if err = wp.updateVolumeMounts(cfg, client, dp.Spec.Selector.MatchLabels); err != nil {
+				scopeLog("failed to update volume mounts: " + err.Error())
 				err = nil
 				continue
 			}
-			if len(wp.Spec.Template.Spec.Containers) == 0 {
-				dpLog("no container volume mount updated")
-				continue
-			}
-			// create patch
-			var p []byte
-			if p, err = json.Marshal(wp); err != nil {
+			var patch []byte
+			if patch, err = wp.jsonMarshal(); err != nil {
 				return
 			}
 			// execute patch
-			if _, err = client.AppsV1().Deployments(dp.Namespace).Patch(context.Background(), dp.Name, types.StrategicMergePatchType, p, metav1.PatchOptions{}); err != nil {
+			if !optDryRun {
+				if _, err = client.AppsV1().Deployments(dp.Namespace).Patch(context.Background(), dp.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+					return
+				}
+			}
+			scopeLog("patched")
+		}
+
+		var stList *appsv1.StatefulSetList
+		if stList, err = client.AppsV1().StatefulSets(ns.Name).List(context.Background(), metav1.ListOptions{}); err != nil {
+			return
+		}
+
+		for _, st := range stList.Items {
+			scopeLog := buildLogger("statefulset", st.Name)
+			// check annotations exists
+			if st.Annotations == nil {
+				continue
+			}
+			// check enabled
+			if enabled, _ := strconv.ParseBool(st.Annotations[AnnotationLogtubeAutoMappingEnabled]); !enabled {
+				continue
+			}
+			// check status.replicas
+			if st.Status.Replicas == 0 {
+				scopeLog("status.replicas == 0")
+				continue
+			}
+			wp := newWorkloadPatch(st.Namespace, st.Name)
+			if err = wp.updateVolumeMounts(cfg, client, st.Spec.Selector.MatchLabels); err != nil {
+				scopeLog("failed to update volume mounts: " + err.Error())
+				err = nil
+				continue
+			}
+			var patch []byte
+			if patch, err = wp.jsonMarshal(); err != nil {
 				return
 			}
-			dpLog("patched")
+			// execute patch
+			if !optDryRun {
+				if _, err = client.AppsV1().Deployments(st.Namespace).Patch(context.Background(), st.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+					return
+				}
+			}
+			scopeLog("patched")
 		}
 	}
 }
