@@ -62,18 +62,18 @@ func determinePodLogPath(cfg *rest.Config, client *kubernetes.Clientset, wlName 
 		container = pod.Spec.Containers[0].Name
 	}
 	// execute
-	req := client.RESTClient().Post().
+	req := client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod.Name).
 		Namespace(pod.Namespace).
 		SubResource("exec")
-	req.SpecificallyVersionedParams(&corev1.PodExecOptions{
+	req.VersionedParams(&corev1.PodExecOptions{
 		Container: container,
 		Command:   []string{"sh"},
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
-	}, scheme.ParameterCodec, corev1.SchemeGroupVersion)
+	}, scheme.ParameterCodec)
 	log.Println(req.URL())
 	var exec remotecommand.Executor
 	if exec, err = remotecommand.NewSPDYExecutor(cfg, "POST", req.URL()); err != nil {
