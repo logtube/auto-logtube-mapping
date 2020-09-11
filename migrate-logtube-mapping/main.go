@@ -122,7 +122,7 @@ func main() {
 			log.Println(string(buf))
 
 			if !optDryRun {
-				if _, err = client.AppsV1().Deployments(wl.Namespace).Patch(context.Background(), wl.Namespace, types.JSONPatchType, buf, metav1.PatchOptions{}); err != nil {
+				if _, err = client.AppsV1().Deployments(wl.Namespace).Patch(context.Background(), wl.Name, types.JSONPatchType, buf, metav1.PatchOptions{}); err != nil {
 					return
 				}
 			}
