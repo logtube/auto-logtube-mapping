@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/deprecated/scheme"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -201,14 +202,24 @@ func main() {
 			}
 			// build patch volumeMounts
 			if err = updateVolumeMounts(cfg, client, podList.Items[0], &wp); err != nil {
-				return
+				dpLog("failed to create volume mount patches: " + err.Error())
+				err = nil
+				continue
 			}
 			if len(wp.Spec.Template.Spec.Containers) == 0 {
 				dpLog("no container volume mount updated")
+				continue
+			}
+			// create patch
+			var p []byte
+			if p, err = json.Marshal(wp); err != nil {
 				return
 			}
-			sPatch, _ := json.Marshal(wp)
-			dpLog("will patch: " + string(sPatch))
+			// execute patch
+			if _, err = client.AppsV1().Deployments(dp.Namespace).Patch(context.Background(), dp.Name, types.StrategicMergePatchType, p, metav1.PatchOptions{}); err != nil {
+				return
+			}
+			dpLog("patched")
 		}
 	}
 }
