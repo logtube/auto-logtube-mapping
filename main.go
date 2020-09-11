@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	optDryRun, _ = strconv.ParseBool(os.Getenv("AUTOMAPPING_DRY_RUN"))
+	optDryRun, _ = strconv.ParseBool(os.Getenv("AUTO_LOGTUBE_MAPPING_DRY_RUN"))
 	optHostPath  = os.Getenv(EnvLogtubeLogsHostPath)
 )
 
