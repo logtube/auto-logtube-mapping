@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,13 +33,13 @@ var (
 		"/var/www/logs",
 		"/var/www/log",
 	}
-	candidateLogPathTestCommand = func() []string {
+	buildCandidateLogPathCheckScript = func() io.Reader {
 		sb := &strings.Builder{}
 		for _, cp := range candidateLogPaths {
 			sb.WriteString(fmt.Sprintf(`if [ -d %s ]; then echo %s; fi;`, cp, cp))
 		}
-		return []string{"sh", "-c", sb.String()}
-	}()
+		return strings.NewReader(sb.String())
+	}
 )
 
 var (
@@ -67,18 +69,21 @@ func determinePodLogPath(cfg *rest.Config, client *kubernetes.Clientset, wlName 
 		SubResource("exec")
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: container,
-		Command:   candidateLogPathTestCommand,
+		Command:   []string{"sh"},
+		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
 	}, scheme.ParameterCodec)
+	log.Println(req.URL())
 	var exec remotecommand.Executor
 	if exec, err = remotecommand.NewSPDYExecutor(cfg, "POST", req.URL()); err != nil {
 		return
 	}
 	out := &bytes.Buffer{}
 	if err = exec.Stream(remotecommand.StreamOptions{
+		Stdin:  buildCandidateLogPathCheckScript(),
 		Stdout: out,
-		Stderr: out,
+		Stderr: ioutil.Discard,
 	}); err != nil {
 		return
 	}
@@ -207,6 +212,7 @@ func main() {
 			// determine log path
 			var logPath string
 			if logPath, err = determinePodLogPath(cfg, client, dp.Name, podList.Items[0]); err != nil {
+				log.Printf("%+v", err)
 				return
 			}
 			dpLog("found log path: " + logPath)
