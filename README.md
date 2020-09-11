@@ -67,6 +67,10 @@ spec:
           containers:
             - name: auto-logtube-mapping
               image: guoyk/auto-logtube-mapping
+              env:
+                - name: LOGTUBE_LOGS_HOST_PATH
+                  # 注意，此处需要指定主机专门规划的日志存储目录
+                  value: /data/logtube-logs
           restartPolicy: OnFailure
 ```
 
@@ -79,6 +83,10 @@ annotations:
     io.github.logtube.auto-mapping/enabled: "true"
 # ....
 ```
+
+4. 在容器内，使用 Dockerfile，或者是 Kubernetes 设置环境变量
+
+`LOGTUBE_K8S_AUTO_MAPPING=/work/logs`
 
 ## 许可证
 

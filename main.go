@@ -26,13 +26,13 @@ const (
 
 	VolumeNameLogtubeAutoMapping = "vol-logtube-auto-mapping"
 
-	EnvLogtubeAutoMapping = "LOGTUBE_K8S_AUTO_MAPPING"
-
-	HostPathLogtubeCollectLogsPrefix = "/data/logtube-logs"
+	EnvLogtubeAutoMapping  = "LOGTUBE_K8S_AUTO_MAPPING"
+	EnvLogtubeLogsHostPath = "LOGTUBE_LOGS_HOST_PATH"
 )
 
 var (
 	optDryRun, _ = strconv.ParseBool(os.Getenv("AUTOMAPPING_DRY_RUN"))
+	optHostPath  = os.Getenv(EnvLogtubeLogsHostPath)
 )
 
 type WorkloadPatch struct {
@@ -51,7 +51,7 @@ func newWorkloadPatch(namespace, name string) *WorkloadPatch {
 	wp.name = name
 	wp.Spec.Template.Spec.Volumes = []corev1.Volume{
 		{Name: VolumeNameLogtubeAutoMapping, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-			Path: HostPathLogtubeCollectLogsPrefix + "/" + namespace + "-" + name,
+			Path: optHostPath + "/" + namespace + "-" + name,
 			Type: &hostPathType,
 		}}},
 	}
@@ -184,6 +184,11 @@ func main() {
 	var err error
 	defer exit(&err)
 
+	if optHostPath == "" {
+		err = errors.New("missing environment variable: " + EnvLogtubeLogsHostPath)
+		return
+	}
+
 	var cfg *rest.Config
 	if cfg, err = rest.InClusterConfig(); err != nil {
 		return
@@ -272,7 +277,7 @@ func main() {
 			}
 			// execute patch
 			if !optDryRun {
-				if _, err = client.AppsV1().Deployments(st.Namespace).Patch(context.Background(), st.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+				if _, err = client.AppsV1().StatefulSets(st.Namespace).Patch(context.Background(), st.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
 					return
 				}
 			}
