@@ -3,9 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -21,83 +20,64 @@ import (
 )
 
 const (
-	AnnotationAutoLogtubeMappingEnabled = "io.github.logtube.auto-mapping/enabled"
-)
+	AnnotationLogtubeAutoMappingEnabled = "io.github.logtube.auto-mapping/enabled"
 
-var (
-	candidateLogPaths = []string{
-		"/work/logs",
-		"/app/logs",
-		"/usr/local/tomcat/logs",
-		"/usr/local/logs",
-		"/var/www/logs",
-		"/var/www/log",
-	}
-	buildCandidateLogPathCheckScript = func() io.Reader {
-		sb := &strings.Builder{}
-		for _, cp := range candidateLogPaths {
-			sb.WriteString(fmt.Sprintf(`if [ -d %s ]; then echo %s; fi;`, cp, cp))
-		}
-		return strings.NewReader(sb.String())
-	}
+	VolumeNameLogtubeAutoMapping = "vol-logtube-auto-mapping"
+
+	EnvLogtubeAutoMapping = "LOGTUBE_K8S_AUTO_MAPPING"
+
+	HostPathLogtubeCollectLogsPrefix = "/data/logtube-logs"
 )
 
 var (
 	optDryRun, _ = strconv.ParseBool(os.Getenv("AUTOMAPPING_DRY_RUN"))
 )
 
-func determinePodLogPath(cfg *rest.Config, client *kubernetes.Clientset, wlName string, pod corev1.Pod) (logPath string, err error) {
-	if len(pod.Spec.Containers) == 0 {
-		err = errors.New("wired, I see no containers in Pod")
-		return
-	}
-	var container string
-	for _, c := range pod.Spec.Containers {
-		if c.Name == wlName {
-			container = wlName
-			break
-		}
-	}
-	if container == "" {
-		container = pod.Spec.Containers[0].Name
-	}
-	// execute
-	req := client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(pod.Name).
-		Namespace(pod.Namespace).
-		SubResource("exec")
-	req.VersionedParams(&corev1.PodExecOptions{
-		Container: container,
-		Command:   []string{"sh"},
-		Stdin:     true,
-		Stdout:    true,
-		Stderr:    true,
-	}, scheme.ParameterCodec)
-	log.Println(req.URL())
-	var exec remotecommand.Executor
-	if exec, err = remotecommand.NewSPDYExecutor(cfg, "POST", req.URL()); err != nil {
-		return
-	}
-	out := &bytes.Buffer{}
-	if err = exec.Stream(remotecommand.StreamOptions{
-		Stdin:  buildCandidateLogPathCheckScript(),
-		Stdout: out,
-		Stderr: ioutil.Discard,
-	}); err != nil {
-		return
-	}
-	outSplits := strings.Split(out.String(), "\n")
-	if len(outSplits) == 0 {
-		err = errors.New("test scripts has no response")
-	}
-	logPath = strings.TrimSpace(outSplits[0])
-	for _, cddLogPath := range candidateLogPaths {
-		if cddLogPath == logPath {
+type WorkloadPatch struct {
+	Spec struct {
+		Template corev1.PodTemplateSpec `json:"template"`
+	} `json:"spec"`
+}
+
+func updateVolumeMounts(cfg *rest.Config, client *kubernetes.Clientset, pod corev1.Pod, wp *WorkloadPatch) (err error) {
+	for _, container := range pod.Spec.Containers {
+		// execute
+		req := client.CoreV1().RESTClient().Post().
+			Resource("pods").
+			Name(pod.Name).
+			Namespace(pod.Namespace).
+			SubResource("exec")
+		req.VersionedParams(&corev1.PodExecOptions{
+			Container: container.Name,
+			Command:   []string{"sh"},
+			Stdin:     true,
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+		var exec remotecommand.Executor
+		if exec, err = remotecommand.NewSPDYExecutor(cfg, "POST", req.URL()); err != nil {
 			return
 		}
+		out := &bytes.Buffer{}
+		if err = exec.Stream(remotecommand.StreamOptions{
+			Stdin:  strings.NewReader(fmt.Sprintf("echo ${%s}", EnvLogtubeAutoMapping)),
+			Stdout: out,
+			Stderr: ioutil.Discard,
+		}); err != nil {
+			return
+		}
+		logPath := strings.TrimSpace(out.String())
+		if logPath == "" {
+			continue
+		}
+		wp.Spec.Template.Spec.Containers = append(wp.Spec.Template.Spec.Containers, corev1.Container{
+			Name: container.Name,
+			VolumeMounts: []corev1.VolumeMount{
+				{MountPath: logPath, Name: VolumeNameLogtubeAutoMapping},
+			},
+		})
+		return
 	}
-	err = errors.New("got unexpected response from test script: " + logPath)
 	return
 }
 
@@ -184,8 +164,8 @@ func main() {
 			if dp.Annotations == nil {
 				continue
 			}
-			// check annotation
-			if enabled, _ := strconv.ParseBool(dp.Annotations[AnnotationAutoLogtubeMappingEnabled]); !enabled {
+			// check enabled
+			if enabled, _ := strconv.ParseBool(dp.Annotations[AnnotationLogtubeAutoMappingEnabled]); !enabled {
 				continue
 			}
 			// check status.replicas
@@ -198,24 +178,37 @@ func main() {
 				dpLog("no selector found")
 				continue
 			}
-			// build selector
-			selector := buildSelector(dp.Spec.Selector.MatchLabels)
 			// list pods
 			var podList *corev1.PodList
-			if podList, err = client.CoreV1().Pods(dp.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector}); err != nil {
+			if podList, err = client.CoreV1().Pods(dp.Namespace).List(
+				context.Background(),
+				metav1.ListOptions{LabelSelector: buildSelector(dp.Spec.Selector.MatchLabels)},
+			); err != nil {
 				return
 			}
 			if len(podList.Items) == 0 {
 				dpLog("no pods found")
 				continue
 			}
-			// determine log path
-			var logPath string
-			if logPath, err = determinePodLogPath(cfg, client, dp.Name, podList.Items[0]); err != nil {
-				log.Printf("%+v", err)
+			var wp WorkloadPatch
+			// build patch volumes
+			hostPathType := corev1.HostPathDirectoryOrCreate
+			wp.Spec.Template.Spec.Volumes = []corev1.Volume{
+				{Name: VolumeNameLogtubeAutoMapping, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+					Path: HostPathLogtubeCollectLogsPrefix + "/" + dp.Namespace + "-" + dp.Name,
+					Type: &hostPathType,
+				}}},
+			}
+			// build patch volumeMounts
+			if err = updateVolumeMounts(cfg, client, podList.Items[0], &wp); err != nil {
 				return
 			}
-			dpLog("found log path: " + logPath)
+			if len(wp.Spec.Template.Spec.Containers) == 0 {
+				dpLog("no container volume mount updated")
+				return
+			}
+			sPatch, _ := json.Marshal(wp)
+			dpLog("will patch: " + string(sPatch))
 		}
 	}
 }
