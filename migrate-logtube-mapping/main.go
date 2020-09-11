@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +22,23 @@ var (
 const (
 	LegacyHostPath = "filebeat-collect-logs"
 )
+
+type ContainerPatch struct {
+	Name         string                   `json:"name"`
+	Env          []map[string]interface{} `json:"env,omitempty"`
+	VolumeMounts []map[string]interface{} `json:"volumeMounts,omitempty"`
+}
+
+type Patch struct {
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers []ContainerPatch         `json:"containers,omitempty"`
+				Volumes    []map[string]interface{} `json:"volumes,omitempty"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+}
 
 func exit(err *error) {
 	if *err != nil {
@@ -68,61 +84,65 @@ func main() {
 		for _, wl := range dpList.Items {
 			log.Printf("deployment: [%s]", wl.Name)
 
-			var volumeIndexes []int
+			var p Patch
+
 			var volumeNames []string
 
-			for vi, v := range wl.Spec.Template.Spec.Volumes {
+			for _, v := range wl.Spec.Template.Spec.Volumes {
 				if v.HostPath != nil {
 					if strings.Contains(v.HostPath.Path, LegacyHostPath) {
-						volumeIndexes = append(volumeIndexes, vi)
+						// delete volume
+						p.Spec.Template.Spec.Volumes = append(p.Spec.Template.Spec.Volumes, map[string]interface{}{
+							"$patch": "delete",
+							"name":   v.Name,
+						})
+						// record volume names
 						volumeNames = append(volumeNames, v.Name)
 					}
 				}
 			}
 
-			var ops []map[string]interface{}
-			for _, vi := range volumeIndexes {
-				ops = append(ops, map[string]interface{}{
-					"op":   "remove",
-					"path": fmt.Sprintf("/spec/template/spec/volumes/%d", vi),
-				})
-			}
+			for _, c := range wl.Spec.Template.Spec.Containers {
+				var found bool
+				cp := ContainerPatch{Name: c.Name}
 
-			for ci, c := range wl.Spec.Template.Spec.Containers {
-				for vmi, vm := range c.VolumeMounts {
+			loopVM:
+				for _, vm := range c.VolumeMounts {
 					for _, vn := range volumeNames {
 						if vm.Name == vn {
-							ops = append(ops, map[string]interface{}{
-								"op":   "remove",
-								"path": fmt.Sprintf("/spec/template/spec/containers/%d/volumeMounts/%d", ci, vmi),
+							cp.VolumeMounts = append(cp.VolumeMounts, map[string]interface{}{
+								"$patch":    "delete",
+								"mountPath": vm.MountPath,
 							})
-							ops = append(ops, map[string]interface{}{
-								"op":   "add",
-								"path": fmt.Sprintf("/spec/template/spec/containers/%d/env/-", ci),
-								"value": map[string]interface{}{
-									"name":  "LOGTUBE_K8S_AUTO_MAPPING",
-									"value": vm.MountPath,
-								},
+
+							cp.Env = append(cp.Env, map[string]interface{}{
+								"name":  "LOGTUBE_K8S_AUTO_MAPPING",
+								"value": vm.MountPath,
 							})
-							break
+							found = true
+							break loopVM
 						}
 					}
 				}
+
+				if found {
+					p.Spec.Template.Spec.Containers = append(p.Spec.Template.Spec.Containers, cp)
+				}
 			}
 
-			if len(ops) == 0 {
+			if len(p.Spec.Template.Spec.Containers) > 0 && len(p.Spec.Template.Spec.Volumes) == 0 {
 				continue
 			}
 
 			var buf []byte
-			if buf, err = json.Marshal(ops); err != nil {
+			if buf, err = json.Marshal(p); err != nil {
 				return
 			}
 
 			log.Println(string(buf))
 
 			if !optDryRun {
-				if _, err = client.AppsV1().Deployments(wl.Namespace).Patch(context.Background(), wl.Name, types.JSONPatchType, buf, metav1.PatchOptions{}); err != nil {
+				if _, err = client.AppsV1().Deployments(wl.Namespace).Patch(context.Background(), wl.Name, types.StrategicMergePatchType, buf, metav1.PatchOptions{}); err != nil {
 					return
 				}
 			}
