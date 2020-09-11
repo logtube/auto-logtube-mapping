@@ -84,6 +84,14 @@ func main() {
 		for _, wl := range dpList.Items {
 			log.Printf("deployment: [%s]", wl.Name)
 
+			if wl.Annotations == nil {
+				continue
+			}
+
+			if enabled, _ := strconv.ParseBool(wl.Annotations["io.github.logtube.auto-mapping/enabled"]); !enabled {
+				continue
+			}
+
 			var p Patch
 
 			var volumeNames []string
@@ -146,12 +154,88 @@ func main() {
 					return
 				}
 			}
-
-			// TODO: remove safe belt
-			break
 		}
 
-		// TODO: remove safe belt
-		break
+		var stList *appsv1.StatefulSetList
+		if stList, err = client.AppsV1().StatefulSets(ns.Name).List(context.Background(), metav1.ListOptions{}); err != nil {
+			return
+		}
+
+		for _, wl := range stList.Items {
+			log.Printf("statefulset: [%s]", wl.Name)
+
+			if wl.Annotations == nil {
+				continue
+			}
+
+			if enabled, _ := strconv.ParseBool(wl.Annotations["io.github.logtube.auto-mapping/enabled"]); !enabled {
+				continue
+			}
+
+			var p Patch
+
+			var volumeNames []string
+
+			for _, v := range wl.Spec.Template.Spec.Volumes {
+				if v.HostPath != nil {
+					if strings.Contains(v.HostPath.Path, LegacyHostPath) {
+						// delete volume
+						p.Spec.Template.Spec.Volumes = append(p.Spec.Template.Spec.Volumes, map[string]interface{}{
+							"$patch": "delete",
+							"name":   v.Name,
+						})
+						// record volume names
+						volumeNames = append(volumeNames, v.Name)
+					}
+				}
+			}
+
+			for _, c := range wl.Spec.Template.Spec.Containers {
+				var found bool
+				cp := ContainerPatch{Name: c.Name}
+
+			loopVM2:
+				for _, vm := range c.VolumeMounts {
+					for _, vn := range volumeNames {
+						if vm.Name == vn {
+							cp.VolumeMounts = append(cp.VolumeMounts, map[string]interface{}{
+								"$patch":    "delete",
+								"mountPath": vm.MountPath,
+							})
+
+							cp.Env = append(cp.Env, map[string]interface{}{
+								"name":  "LOGTUBE_K8S_AUTO_MAPPING",
+								"value": vm.MountPath,
+							})
+							found = true
+							break loopVM2
+						}
+					}
+				}
+
+				if found {
+					p.Spec.Template.Spec.Containers = append(p.Spec.Template.Spec.Containers, cp)
+				}
+			}
+
+			if len(p.Spec.Template.Spec.Containers) > 0 && len(p.Spec.Template.Spec.Volumes) == 0 {
+				continue
+			}
+
+			var buf []byte
+			if buf, err = json.Marshal(p); err != nil {
+				return
+			}
+
+			log.Println(string(buf))
+
+			if !optDryRun {
+				if _, err = client.AppsV1().StatefulSets(wl.Namespace).Patch(context.Background(), wl.Name, types.StrategicMergePatchType, buf, metav1.PatchOptions{}); err != nil {
+					return
+				}
+			}
+
+		}
+
 	}
 }
