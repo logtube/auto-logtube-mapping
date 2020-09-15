@@ -26,6 +26,8 @@ const (
 
 	VolumeNameLogtubeAutoMapping = "vol-logtube-auto-mapping"
 
+	MarkFileLogtubeAutoMapping = "/tmp/autoops.logtube.auto-mapping.txt"
+
 	EnvLogtubeAutoMapping  = "LOGTUBE_K8S_AUTO_MAPPING"
 	EnvLogtubeLogsHostPath = "LOGTUBE_LOGS_HOST_PATH"
 )
@@ -34,6 +36,18 @@ var (
 	optDryRun, _ = strconv.ParseBool(os.Getenv("AUTO_LOGTUBE_MAPPING_DRY_RUN"))
 	optHostPath  = os.Getenv(EnvLogtubeLogsHostPath)
 )
+
+func buildLogPathCheckScript() string {
+	return fmt.Sprintf(`
+	if [ -n "${%s}" ]; then
+		echo ${%s}
+	else
+		if [ -f "%s" ]; then
+			cat "%s"
+		fi
+	fi
+`, EnvLogtubeAutoMapping, EnvLogtubeAutoMapping, MarkFileLogtubeAutoMapping, MarkFileLogtubeAutoMapping)
+}
 
 type WorkloadPatch struct {
 	Spec struct {

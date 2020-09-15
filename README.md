@@ -84,9 +84,17 @@ annotations:
 # ....
 ```
 
-4. 在容器内，使用 Dockerfile，或者是 Kubernetes 设置环境变量
+4. 生命日志目录
 
-`LOGTUBE_K8S_AUTO_MAPPING=/work/logs`
+    * 使用环境变量
+    
+        在容器内，使用 Dockerfile，或者 Kubernetes 设置环境变量
+
+        `LOGTUBE_K8S_AUTO_MAPPING=/work/logs`
+    
+    * 将日志目录写入标志文件
+    
+        `/tmp/autoops.logtube.auto-mapping.txt`
 
 ## 许可证
 
